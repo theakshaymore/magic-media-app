@@ -77,6 +77,26 @@ const devUser = {
 };
 
 const mochaAuthMiddleware = async (c: any, next: any) => {
+  // Check for manual session first
+  const sessionToken = getCookie(c, "session_token");
+  if (sessionToken) {
+    const db = c.env.DB;
+    const session = await db
+      .prepare("SELECT us.*, u.* FROM user_sessions us JOIN users u ON us.user_id = u.id WHERE us.token = ? AND us.expires_at > datetime('now')")
+      .bind(sessionToken)
+      .first();
+
+    if (session) {
+      c.set("user", {
+        id: session.user_id,
+        email: session.email,
+        name: session.name,
+      });
+      return next();
+    }
+  }
+
+  // Fall back to Mocha OAuth
   if (!isMochaAuthConfigured(c.env)) {
     c.set("user", devUser);
     return next();
@@ -274,6 +294,155 @@ app.post(
 
 // ===== AUTH ROUTES =====
 
+// Manual Registration
+app.post("/api/auth/register", async (c) => {
+  const db = c.env.DB;
+  const body = await c.req.json();
+  const { email, password, name } = body;
+
+  // Validate input
+  if (!email || !password) {
+    return c.json({ error: "Email and password are required" }, 400);
+  }
+
+  if (password.length < 6) {
+    return c.json({ error: "Password must be at least 6 characters" }, 400);
+  }
+
+  try {
+    // Check if user already exists
+    const existingUser = await db
+      .prepare("SELECT * FROM users WHERE email = ?")
+      .bind(email.toLowerCase())
+      .first();
+
+    if (existingUser) {
+      return c.json({ error: "Email already registered" }, 409);
+    }
+
+    // Create password hash (simple hash for demo - in production use bcrypt)
+    const passwordHash = await hashPassword(password);
+    const userId = uuidv4();
+    const now = new Date().toISOString();
+
+    // Create user
+    await db
+      .prepare(
+        "INSERT INTO users (id, email, password_hash, name, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)"
+      )
+      .bind(userId, email.toLowerCase(), passwordHash, name || "", now, now)
+      .run();
+
+    // Initialize user credits
+    await db
+      .prepare(
+        "INSERT INTO user_credits (user_id, credits_balance, total_credits_used, last_updated, email) VALUES (?, 10000, 0, ?, ?)"
+      )
+      .bind(userId, now, email.toLowerCase())
+      .run();
+
+    // Create session
+    const sessionId = uuidv4();
+    const sessionToken = uuidv4();
+    const expiresAt = new Date(Date.now() + 60 * 24 * 60 * 60 * 1000); // 60 days
+
+    await db
+      .prepare(
+        "INSERT INTO user_sessions (id, user_id, token, created_at, expires_at) VALUES (?, ?, ?, ?, ?)"
+      )
+      .bind(sessionId, userId, sessionToken, now, expiresAt.toISOString())
+      .run();
+
+    setCookie(c, "session_token", sessionToken, {
+      httpOnly: true,
+      path: "/",
+      sameSite: "none",
+      secure: true,
+      maxAge: 60 * 24 * 60 * 60, // 60 days
+    });
+
+    return c.json({
+      success: true,
+      user: { id: userId, email: email.toLowerCase(), name: name || "" },
+    });
+  } catch (error) {
+    console.error("Registration error:", error);
+    return c.json({ error: "Registration failed" }, 500);
+  }
+});
+
+// Manual Login
+app.post("/api/auth/login", async (c) => {
+  const db = c.env.DB;
+  const body = await c.req.json();
+  const { email, password } = body;
+
+  if (!email || !password) {
+    return c.json({ error: "Email and password are required" }, 400);
+  }
+
+  try {
+    // Find user
+    const user = await db
+      .prepare("SELECT * FROM users WHERE email = ?")
+      .bind(email.toLowerCase())
+      .first();
+
+    if (!user) {
+      return c.json({ error: "Invalid email or password" }, 401);
+    }
+
+    // Verify password
+    const passwordValid = await verifyPassword(password, user.password_hash as string);
+    if (!passwordValid) {
+      return c.json({ error: "Invalid email or password" }, 401);
+    }
+
+    // Create session
+    const sessionId = uuidv4();
+    const sessionToken = uuidv4();
+    const now = new Date().toISOString();
+    const expiresAt = new Date(Date.now() + 60 * 24 * 60 * 60 * 1000); // 60 days
+
+    await db
+      .prepare(
+        "INSERT INTO user_sessions (id, user_id, token, created_at, expires_at) VALUES (?, ?, ?, ?, ?)"
+      )
+      .bind(sessionId, user.id, sessionToken, now, expiresAt.toISOString())
+      .run();
+
+    setCookie(c, "session_token", sessionToken, {
+      httpOnly: true,
+      path: "/",
+      sameSite: "none",
+      secure: true,
+      maxAge: 60 * 24 * 60 * 60, // 60 days
+    });
+
+    return c.json({
+      success: true,
+      user: { id: user.id, email: user.email, name: user.name },
+    });
+  } catch (error) {
+    console.error("Login error:", error);
+    return c.json({ error: "Login failed" }, 500);
+  }
+});
+
+// Password hashing helper (simple implementation - use bcrypt in production)
+async function hashPassword(password: string): Promise<string> {
+  const encoder = new TextEncoder();
+  const data = encoder.encode(password);
+  const hashBuffer = await crypto.subtle.digest('SHA-256', data);
+  const hashArray = Array.from(new Uint8Array(hashBuffer));
+  return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+async function verifyPassword(password: string, hash: string): Promise<boolean> {
+  const passwordHash = await hashPassword(password);
+  return passwordHash === hash;
+}
+
 // Get OAuth redirect URL
 app.get("/api/oauth/google/redirect_url", async (c) => {
   if (!isMochaAuthConfigured(c.env)) {
@@ -381,6 +550,26 @@ app.get("/api/users/me/credits", mochaAuthMiddleware, async (c) => {
 
 // Logout
 app.get("/api/logout", async (c) => {
+  const db = c.env.DB;
+
+  // Clear manual session
+  const manualSessionToken = getCookie(c, "session_token");
+  if (manualSessionToken) {
+    await db
+      .prepare("DELETE FROM user_sessions WHERE token = ?")
+      .bind(manualSessionToken)
+      .run();
+
+    setCookie(c, "session_token", "", {
+      httpOnly: true,
+      path: "/",
+      sameSite: "none",
+      secure: true,
+      maxAge: 0,
+    });
+  }
+
+  // Clear OAuth session
   const sessionToken = getCookie(c, MOCHA_SESSION_TOKEN_COOKIE_NAME);
 
   if (typeof sessionToken === "string" && isMochaAuthConfigured(c.env)) {
@@ -1134,7 +1323,96 @@ app.post(
 
 // ===== AI CONTENT GENERATION =====
 
-// Generate AI content for email blocks
+// Helper function to generate sample content programmatically
+function generateSampleContent(type: string, tone: string, answers: Record<string, string>, customSubject?: string, customCTA?: string) {
+  const blockConfig: Record<string, any> = {
+    welcome: {
+      name: "Welcome Email",
+      defaultSubject: "Welcome to Our Community! 🎉",
+      defaultBody: `Hello and welcome!\n\nWe're thrilled to have you join our community. As a new member, you're now part of something special.\n\nHere's what you can expect from us:\n• Exclusive updates and insights\n• Special member-only offers\n• Expert tips and resources\n\nWe're committed to providing you with valuable content that helps you achieve your goals.\n\nLet's get started on this exciting journey together!`,
+      defaultCTA: "Get Started",
+    },
+    "follow-up": {
+      name: "Follow-Up Email",
+      defaultSubject: "Just Checking In...",
+      defaultBody: `Hi there!\n\nI wanted to follow up with you and see how things are going. Your success is important to us, and we're here to help.\n\nHave you had a chance to explore everything we have to offer? If you have any questions or need assistance, don't hesitate to reach out.\n\nWe've prepared some resources that might be helpful for you.\n\nLooking forward to hearing from you!`,
+      defaultCTA: "View Resources",
+    },
+    offer: {
+      name: "Special Offer Email",
+      defaultSubject: "🎁 Exclusive Offer Just For You!",
+      defaultBody: `Great news!\n\nWe have an exclusive offer that we think you'll love. For a limited time, you can take advantage of this special promotion.\n\nThis is our way of saying thank you for being part of our community. We want to help you get the most value possible.\n\nDon't miss out on this opportunity - this offer won't last forever!\n\nClaim your special discount today and start enjoying the benefits.`,
+      defaultCTA: "Claim Offer Now",
+    },
+    reminder: {
+      name: "Friendly Reminder",
+      defaultSubject: "⏰ Don't Forget - Action Required",
+      defaultBody: `Quick reminder!\n\nWe noticed you haven't completed your setup yet. We want to make sure you don't miss out on all the great features available to you.\n\nIt only takes a few minutes to get everything configured, and you'll be glad you did.\n\nTake a moment now to finish setting up your account and unlock your full potential.\n\nWe're here if you need any help along the way!`,
+      defaultCTA: "Complete Setup",
+    },
+    upsell: {
+      name: "Upgrade Opportunity",
+      defaultSubject: "Take Your Experience to the Next Level 🚀",
+      defaultBody: `You've been doing great so far!\n\nBased on your activity, we think you're ready to unlock even more powerful features with our premium plan.\n\nHere's what you'll get when you upgrade:\n• Advanced tools and capabilities\n• Priority support\n• Exclusive premium content\n• And much more!\n\nUpgrade today and see the difference it makes.`,
+      defaultCTA: "Upgrade Now",
+    },
+    "abandon-cart": {
+      name: "Cart Reminder",
+      defaultSubject: "You Left Something Behind! 🛒",
+      defaultBody: `Hey there!\n\nWe noticed you left some items in your cart. We've saved them for you, but they won't last forever.\n\nYour items are waiting:\n• Quality products you selected\n• Special pricing still available\n• Fast shipping options\n\nComplete your purchase now before items sell out or prices change.\n\nNeed help deciding? Our team is here to answer any questions you might have!`,
+      defaultCTA: "Complete Purchase",
+    },
+    reactivation: {
+      name: "We Miss You!",
+      defaultSubject: "We'd Love to See You Again! 💙",
+      defaultBody: `It's been a while!\n\nWe've noticed you haven't been around lately, and we wanted to reach out. We miss having you as an active member of our community.\n\nA lot has changed since you were last here:\n• New features and improvements\n• Fresh content and resources\n• Better tools to help you succeed\n\nCome back and see what you've been missing. We'd love to have you back!\n\nYour account is still active and ready whenever you are.`,
+      defaultCTA: "Welcome Back",
+    },
+  };
+
+  const config = blockConfig[type] || blockConfig.welcome;
+
+  // Apply tone variations to the body
+  let bodyWithTone = config.defaultBody;
+
+  switch(tone) {
+    case 'professional':
+      bodyWithTone = bodyWithTone.replace(/Hi there!/g, 'Greetings')
+        .replace(/We're thrilled/g, 'We are pleased')
+        .replace(/!/g, '.');
+      break;
+    case 'casual':
+      bodyWithTone = bodyWithTone.replace(/Hello/g, 'Hey')
+        .replace(/We are/g, "We're")
+        .replace(/do not/g, "don't");
+      break;
+    case 'persuasive':
+      bodyWithTone = bodyWithTone + "\n\nThis is a limited-time opportunity you won't want to miss!";
+      break;
+    case 'urgent':
+      bodyWithTone = "⚡ TIME SENSITIVE ⚡\n\n" + bodyWithTone + "\n\nAct now before it's too late!";
+      break;
+  }
+
+  // Incorporate user answers if provided
+  if (answers && Object.keys(answers).length > 0) {
+    const answersText = Object.values(answers).filter(a => a?.trim()).join('. ');
+    if (answersText) {
+      bodyWithTone = `Based on your interests in ${answersText.toLowerCase()}, here's something special for you:\n\n` + bodyWithTone;
+    }
+  }
+
+  return {
+    name: config.name,
+    subject_line: customSubject || config.defaultSubject,
+    preview_text: `Preview: ${config.defaultSubject.substring(0, 50)}...`,
+    body_copy: bodyWithTone,
+    cta_text: customCTA || config.defaultCTA,
+    cta_url: "https://example.com",
+  };
+}
+
+// Generate AI content for email blocks (using programmatic sample content)
 app.post(
   "/api/ai/generate-content",
   mochaAuthMiddleware,
@@ -1195,112 +1473,17 @@ app.post(
       );
     }
 
-    const openaiKey = c.env.OPENAI_API_KEY;
-    console.log("[AI Generation] OpenAI key check:", {
-      hasKey: !!openaiKey,
-      keyPrefix: openaiKey ? openaiKey.substring(0, 10) + "..." : "none",
-    });
-
-    if (!openaiKey) {
-      console.error("[AI Generation] OpenAI API key not configured");
-      return c.json({ error: "OpenAI API key not configured" }, 500);
-    }
-
     try {
-      const client = new OpenAI({
-        apiKey: openaiKey,
-      });
-      console.log("[AI Generation] OpenAI client created successfully");
+      console.log("[AI Generation] Generating sample content programmatically");
 
-      // Build context-aware prompt based on block type and answers
-      const blockConfig = {
-        welcome: "welcome email that introduces new subscribers",
-        "follow-up": "follow-up email that nurtures leads",
-        offer: "promotional email with a special offer",
-        reminder: "reminder email to encourage action",
-        upsell: "upsell email to promote upgrades",
-        "abandon-cart": "cart abandonment recovery email",
-        reactivation: "re-engagement email for inactive subscribers",
-      };
-
-      let prompt = `Create a ${
-        blockConfig[body.type]
-      } with the following details:\n`;
-
-      if (body.answers && Object.keys(body.answers).length > 0) {
-        prompt +=
-          Object.entries(body.answers)
-            .map(([, value]) => `- ${value}`)
-            .join("\n") + "\n\n";
-      }
-
-      if (body.custom_subject) {
-        prompt += `Use this subject line: "${body.custom_subject}"\n`;
-      }
-
-      if (body.custom_cta) {
-        prompt += `Use this call-to-action: "${body.custom_cta}"\n`;
-      }
-
-      prompt += `Tone: ${body.tone}
-
-Please generate:
-1. A compelling email name/title
-2. ${
-        body.custom_subject
-          ? "Keep the provided subject line as is"
-          : "An attention-grabbing subject line"
-      }
-3. Preview text that complements the subject
-4. Email body copy (2-3 paragraphs, personable and ${body.tone})
-5. ${
+      // Generate sample content programmatically instead of using OpenAI
+      const generatedContent = generateSampleContent(
+        body.type,
+        body.tone,
+        body.answers || {},
+        body.custom_subject,
         body.custom_cta
-          ? "Keep the provided CTA text as is"
-          : "Call-to-action button text"
-      }
-6. A relevant URL placeholder
-
-Format as JSON with keys: name, subject_line, preview_text, body_copy, cta_text, cta_url`;
-
-      console.log("[AI Generation] Calling OpenAI API...");
-      const response = await client.chat.completions.create({
-        model: "gpt-4o-mini",
-        messages: [
-          {
-            role: "system",
-            content:
-              "You are an expert email marketing copywriter. Create compelling, conversion-focused email content that matches the requested tone and purpose. Always respond with valid JSON.",
-          },
-          {
-            role: "user",
-            content: prompt,
-          },
-        ],
-        response_format: { type: "json_object" },
-        temperature: 0.7,
-      });
-
-      console.log("[AI Generation] OpenAI API call successful");
-      console.log(
-        "[AI Generation] Response content length:",
-        response.choices[0].message.content?.length || 0
       );
-
-      const content = JSON.parse(response.choices[0].message.content || "{}");
-      console.log("[AI Generation] Parsed content keys:", Object.keys(content));
-
-      // Ensure all required fields are present
-      const generatedContent = {
-        name: content.name || `${blockConfig[body.type]} Email`,
-        subject_line:
-          body.custom_subject ||
-          content.subject_line ||
-          "Your subject line here",
-        preview_text: content.preview_text || "Preview text here",
-        body_copy: content.body_copy || "Email content here",
-        cta_text: body.custom_cta || content.cta_text || "Click Here",
-        cta_url: content.cta_url || "https://example.com",
-      };
 
       // Calculate credits used based on word count (5 credits per word generated)
       const wordCount = [
@@ -1321,8 +1504,8 @@ Format as JSON with keys: name, subject_line, preview_text, body_copy, cta_text,
       await db
         .prepare(
           `
-      UPDATE user_credits 
-      SET credits_balance = credits_balance - ?, 
+      UPDATE user_credits
+      SET credits_balance = credits_balance - ?,
           total_credits_used = total_credits_used + ?,
           last_updated = ?
       WHERE user_id = ?
@@ -1347,19 +1530,13 @@ Format as JSON with keys: name, subject_line, preview_text, body_copy, cta_text,
       console.error("[AI Generation] Error details:", {
         message: error?.message,
         name: error?.name,
-        status: error?.status,
-        type: error?.type,
-        code: error?.code,
         stack: error?.stack?.split("\n").slice(0, 3),
       });
 
-      // Return more specific error message
-      const errorMessage = error?.message || "Unknown error occurred";
       return c.json(
         {
           error: "Failed to generate content",
-          details: errorMessage,
-          hint: "Check server logs for more information",
+          details: error?.message || "Unknown error occurred",
         },
         500
       );
@@ -1367,9 +1544,57 @@ Format as JSON with keys: name, subject_line, preview_text, body_copy, cta_text,
   }
 );
 
-// Rewrite email content with different tone
+// Helper function to rewrite content with different tone
+function rewriteContentWithTone(content: any, tone: string) {
+  let { subject_line, preview_text, body_copy, cta_text } = content;
+
+  switch(tone) {
+    case 'professional':
+      subject_line = subject_line.replace(/!/g, '.').replace(/🎉|🎁|⏰|🚀|🛒|💙/g, '');
+      body_copy = body_copy
+        .replace(/Hi there/g, 'Greetings')
+        .replace(/Hey/g, 'Hello')
+        .replace(/We're/g, 'We are')
+        .replace(/don't/g, 'do not')
+        .replace(/!/g, '.');
+      cta_text = cta_text.replace(/!/g, '');
+      break;
+
+    case 'friendly':
+      if (!subject_line.includes('!')) subject_line += '!';
+      body_copy = body_copy.replace(/Greetings/g, 'Hi there');
+      break;
+
+    case 'casual':
+      body_copy = body_copy
+        .replace(/Greetings/g, 'Hey')
+        .replace(/We are/g, "We're")
+        .replace(/do not/g, "don't");
+      break;
+
+    case 'persuasive':
+      subject_line = "Don't Miss Out: " + subject_line;
+      body_copy = body_copy + "\n\nThis opportunity is too good to pass up. Join thousands of satisfied customers who've already taken action!";
+      cta_text = cta_text + " - Limited Time";
+      break;
+
+    case 'urgent':
+      subject_line = "⚡ URGENT: " + subject_line;
+      body_copy = "⏰ TIME SENSITIVE ⏰\n\n" + body_copy + "\n\n🚨 Don't wait - act now before this opportunity expires!";
+      cta_text = "Act Now - " + cta_text;
+      break;
+  }
+
+  return {
+    subject_line,
+    preview_text: preview_text || `Preview: ${subject_line.substring(0, 50)}...`,
+    body_copy,
+    cta_text,
+  };
+}
+
+// Rewrite email content with different tone (using programmatic approach)
 app.post("/api/ai/rewrite-content", mochaAuthMiddleware, async (c) => {
-  const db = c.env.DB;
   const user = c.get("user");
   const body = await c.req.json();
 
@@ -1377,123 +1602,27 @@ app.post("/api/ai/rewrite-content", mochaAuthMiddleware, async (c) => {
     return c.json({ error: "Unauthorized" }, 401);
   }
 
-  // Get or create user credits record
-  let userCredits = await db
-    .prepare("SELECT * FROM user_credits WHERE user_id = ?")
-    .bind(user.id)
-    .first();
-
-  if (!userCredits) {
-    // Initialize credits for new user
-    const now = new Date().toISOString();
-    await db
-      .prepare(
-        `
-      INSERT INTO user_credits (user_id, credits_balance, total_credits_used, last_updated, email)
-      VALUES (?, 10000, 0, ?, ?)
-    `
-      )
-      .bind(user.id, now, user.email)
-      .run();
-
-    userCredits = await db
-      .prepare("SELECT * FROM user_credits WHERE user_id = ?")
-      .bind(user.id)
-      .first();
-  }
-
-  // Check if user has enough credits (estimate ~800 credits per rewrite)
-  const estimatedCost = 800;
-  if ((userCredits?.credits_balance as number) < estimatedCost) {
-    return c.json(
-      {
-        error: "Insufficient AI Credits",
-        credits_balance: userCredits?.credits_balance,
-        credits_needed: estimatedCost,
-        message:
-          "You don't have enough AI credits to rewrite content. Please upgrade your plan or purchase more credits.",
-      },
-      403
-    );
-  }
-
-  const openaiKey = (c.env as any).OPENAI_API_KEY;
-  if (!openaiKey) {
-    return c.json({ error: "OpenAI API key not configured" }, 500);
-  }
-
   try {
-    const client = new OpenAI({
-      apiKey: openaiKey,
-    });
+    // Rewrite content programmatically based on tone
+    const rewrittenContent = rewriteContentWithTone(body, body.tone);
 
-    const prompt = `Rewrite this email content with a ${body.tone} tone:
-
-Subject: ${body.subject_line}
-Preview: ${body.preview_text}
-Body: ${body.body_copy}
-CTA: ${body.cta_text}
-
-Keep the same core message but adjust the tone to be more ${body.tone}. Format as JSON with keys: subject_line, preview_text, body_copy, cta_text`;
-
-    const response = await client.chat.completions.create({
-      model: "gpt-4o-mini",
-      messages: [
-        {
-          role: "system",
-          content:
-            "You are an expert email copywriter. Rewrite email content to match the requested tone while preserving the core message and call-to-action. Always respond with valid JSON.",
-        },
-        {
-          role: "user",
-          content: prompt,
-        },
-      ],
-      response_format: { type: "json_object" },
-      temperature: 0.7,
-    });
-
-    const content = JSON.parse(response.choices[0].message.content || "{}");
-
-    // Calculate credits used based on word count (5 credits per word generated)
+    // Calculate word count for demonstration (no credits deducted for rewrite)
     const wordCount = [
-      content.subject_line || "",
-      content.preview_text || "",
-      content.body_copy || "",
-      content.cta_text || "",
+      rewrittenContent.subject_line || "",
+      rewrittenContent.preview_text || "",
+      rewrittenContent.body_copy || "",
+      rewrittenContent.cta_text || "",
     ]
       .join(" ")
       .split(/\s+/)
       .filter((word) => word.length > 0).length;
 
-    const creditsUsed = Math.max(50, wordCount * 5); // Minimum 50 credits, 5 credits per word
-
-    // Deduct credits
-    const now = new Date().toISOString();
-    await db
-      .prepare(
-        `
-      UPDATE user_credits 
-      SET credits_balance = credits_balance - ?, 
-          total_credits_used = total_credits_used + ?,
-          last_updated = ?
-      WHERE user_id = ?
-    `
-      )
-      .bind(creditsUsed, creditsUsed, now, user.id)
-      .run();
-
-    console.log("[AI Rewrite] Credits deducted:", {
+    console.log("[AI Rewrite] Content rewritten:", {
       wordCount,
-      creditsUsed,
       userId: user.id,
     });
 
-    return c.json({
-      ...content,
-      credits_used: creditsUsed,
-      word_count: wordCount,
-    });
+    return c.json(rewrittenContent);
   } catch (error) {
     console.error("AI rewrite error:", error);
     return c.json({ error: "Failed to rewrite content" }, 500);

@@ -89,53 +89,42 @@ export default function BlockSidebar({ onAddBlock, isCollapsed, onToggle, select
                   <span className="text-sm font-medium text-purple-900">AI-Powered Content</span>
                 </div>
                 <p className="text-xs text-purple-700">
-                  Click any block type to add manually, or use the AI generator for smart content creation.
+                  Add an email block, then use the AI Generate tab inside the editor to create content with AI.
                 </p>
               </div>
             )}
 
+            {/* Separator */}
+            {!isCollapsed && (
+              <div className="my-4 border-t border-gray-200"></div>
+            )}
+
             {/* Email Block Types */}
             {Object.entries(BLOCK_TYPE_CONFIG).map(([type, config]) => (
-              <div key={type} className="space-y-2">
-                <button
-                  onClick={() => onAddBlock(type as EmailBlockTypeT, false)}
-                  className={`w-full p-4 text-left rounded-xl border-2 transition-all hover:shadow-md group ${
-                    config.bgColor
-                  } ${config.borderColor} hover:border-opacity-60`}
-                >
-                  <div className="flex items-center gap-3">
-                    <span className="text-2xl">{config.icon}</span>
-                    {!isCollapsed && (
-                      <div className="flex-1">
-                        <h3 className={`font-medium ${config.color}`}>
-                          {config.label}
-                        </h3>
-                        <p className="text-xs text-gray-600 mt-1">
-                          Add to your sequence
-                        </p>
-                      </div>
-                    )}
-                    {!isCollapsed && (
-                      <Plus className={`w-5 h-5 ${config.color} opacity-60 group-hover:opacity-100 transition-opacity`} />
-                    )}
-                  </div>
-                </button>
-                
-                {/* AI Generate Button */}
-                {!isCollapsed && (
-                  <button
-                    onClick={() => onAddBlock(type as EmailBlockTypeT, true)}
-                    className={`w-full p-2 text-left rounded-lg border-2 ${config.borderColor} ${config.bgColor} hover:opacity-80 transition-all group`}
-                  >
-                    <div className="flex items-center gap-2">
-                      <Wand2 className={`w-4 h-4 ${config.color}`} />
-                      <span className={`text-sm font-medium ${config.color}`}>
-                        Generate {config.label} with AI
-                      </span>
+              <button
+                key={type}
+                onClick={() => onAddBlock(type as EmailBlockTypeT, false)}
+                className={`w-full p-4 text-left rounded-xl border-2 transition-all hover:shadow-md group ${
+                  config.bgColor
+                } ${config.borderColor} hover:border-opacity-60 mb-3`}
+              >
+                <div className="flex items-center gap-3">
+                  <span className="text-2xl">{config.icon}</span>
+                  {!isCollapsed && (
+                    <div className="flex-1">
+                      <h3 className={`font-medium ${config.color}`}>
+                        {config.label}
+                      </h3>
+                      <p className="text-xs text-gray-600 mt-1">
+                        Add to your sequence
+                      </p>
                     </div>
-                  </button>
-                )}
-              </div>
+                  )}
+                  {!isCollapsed && (
+                    <Plus className={`w-5 h-5 ${config.color} opacity-60 group-hover:opacity-100 transition-opacity`} />
+                  )}
+                </div>
+              </button>
             ))}
           </div>
         )}

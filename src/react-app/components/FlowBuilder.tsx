@@ -66,12 +66,18 @@ export default function FlowBuilder({
   const prevBlockCountRef = useRef<number>(0);
   const prevConnectionCountRef = useRef<number>(0);
   const initializedRef = useRef(false);
+  const isApplyingHistoryRef = useRef(false);
 
   useEffect(() => {
+    // Don't update state if we're applying undo/redo
+    if (isApplyingHistoryRef.current) {
+      return;
+    }
+
     const isInitialLoad = !initializedRef.current;
     const currentBlockCount = blocks?.length || 0;
     const currentConnectionCount = connections?.length || 0;
-    
+
     // Only reset on initial load - after that, let setState handle updates
     if (isInitialLoad) {
       const newState = {
@@ -87,11 +93,11 @@ export default function FlowBuilder({
       // update the state through setState to preserve history
       const blocksChanged = currentBlockCount !== prevBlockCountRef.current;
       const connectionsChanged = currentConnectionCount !== prevConnectionCountRef.current;
-      
+
       // Also check if block content changed (for edits that don't change count)
-      const blockContentChanged = !blocksChanged && blocks && flowState.blocks && 
+      const blockContentChanged = !blocksChanged && blocks && flowState.blocks &&
         JSON.stringify(blocks) !== JSON.stringify(flowState.blocks);
-      
+
       if (blocksChanged || connectionsChanged || blockContentChanged) {
         setFlowState({
           blocks: blocks || [],
@@ -106,8 +112,6 @@ export default function FlowBuilder({
   // Use flow state for current blocks and connections
   const currentBlocks = flowState.blocks;
   const currentConnections = flowState.connections;
-  // Track if we're in the middle of applying undo/redo to prevent backend sync
-  const isApplyingHistoryRef = useRef(false);
 
   // Handle block deletion with undo/redo
   const handleDeleteBlock = useCallback((blockId: string) => {
@@ -137,21 +141,25 @@ export default function FlowBuilder({
     }
   }, [setFlowState, onDeleteConnection]);
 
-  // Override undo/redo to set the flag
+  // Override undo/redo to set the flag and sync to backend after history is applied
   const handleUndo = useCallback(() => {
     isApplyingHistoryRef.current = true;
     undo();
+    // Give time for state to update, then sync to backend
     setTimeout(() => {
       isApplyingHistoryRef.current = false;
-    }, 0);
+      // The effect will handle syncing on next render
+    }, 100);
   }, [undo]);
 
   const handleRedo = useCallback(() => {
     isApplyingHistoryRef.current = true;
     redo();
+    // Give time for state to update, then sync to backend
     setTimeout(() => {
       isApplyingHistoryRef.current = false;
-    }, 0);
+      // The effect will handle syncing on next render
+    }, 100);
   }, [redo]);
 
   // Handle keyboard shortcuts

@@ -14,6 +14,7 @@ import SequenceSelector from '@/react-app/components/SequenceSelector';
 import AutoSaveIndicator from '@/react-app/components/AutoSaveIndicator';
 import TemplateModal from '@/react-app/components/TemplateModal';
 import AccountSettingsModal from '@/react-app/components/AccountSettingsModal';
+import LoginRegisterPage from '@/react-app/components/LoginRegisterPage';
 
 import { useSequences, useSequenceData } from '@/react-app/hooks/useApi';
 import { EmailBlock, EmailBlockTypeT, BLOCK_TYPE_CONFIG } from '@/shared/types';
@@ -348,50 +349,7 @@ export default function HomePage() {
 
   // Show login screen if not authenticated
   if (!user) {
-    return (
-      <div className="min-h-screen bg-gradient-to-br from-slate-50 via-white to-blue-50 flex items-center justify-center p-4">
-        <div className="bg-white rounded-2xl shadow-2xl max-w-md w-full p-8">
-          <div className="text-center mb-8">
-            <div className="w-16 h-16 bg-gradient-to-br from-blue-600 to-purple-600 rounded-2xl flex items-center justify-center mx-auto mb-4">
-              <Plus className="w-8 h-8 text-white" />
-            </div>
-            <h1 className="text-2xl font-bold text-gray-900 mb-2">
-              Email Architect Suite
-            </h1>
-            <p className="text-gray-600">
-              Build powerful email sequences with visual flow builder and AI content generation
-            </p>
-          </div>
-
-          <div className="space-y-4">
-            <button
-              onClick={redirectToLogin}
-              className="w-full bg-gradient-to-r from-blue-600 to-purple-600 text-white py-3 px-4 rounded-lg hover:from-blue-700 hover:to-purple-700 transition-all duration-200 font-medium"
-            >
-              Sign in with Google
-            </button>
-            
-            <div className="text-center">
-              <button
-                onClick={() => navigate('/dashboard')}
-                className="text-blue-600 hover:text-blue-700 text-sm font-medium"
-              >
-                View Dashboard
-              </button>
-            </div>
-          </div>
-
-          <div className="mt-8 pt-6 border-t border-gray-100">
-            <div className="text-sm text-gray-500 space-y-2">
-              <p>✨ AI-powered email content generation</p>
-              <p>🎯 Visual drag-and-drop flow builder</p>
-              <p>📊 Export to major email platforms</p>
-              <p>🔄 Advanced branching logic</p>
-            </div>
-          </div>
-        </div>
-      </div>
-    );
+    return <LoginRegisterPage onLoginSuccess={() => window.location.reload()} />;
   }
 
   return (

@@ -1,8 +1,9 @@
 import { useState, useEffect } from 'react';
 import { useForm } from 'react-hook-form';
-import { X, Mail, Clock, MousePointer, Type, Eye, RefreshCw, Calendar } from 'lucide-react';
+import { X, Mail, Clock, MousePointer, Type, Eye, RefreshCw, Calendar, Wand2, Loader2, ChevronDown, Coins } from 'lucide-react';
 import { EmailBlock, BLOCK_TYPE_CONFIG } from '@/shared/types';
 import RichTextEditor from './RichTextEditor';
+import { SUBJECT_LINE_TEMPLATES, CTA_TEMPLATES } from '@/react-app/data/emailTemplates';
 
 interface EmailBlockModalProps {
   block: EmailBlock | null;
@@ -24,10 +25,20 @@ interface FormData {
 }
 
 export default function EmailBlockModal({ block, onClose, onSave }: EmailBlockModalProps) {
-  const [activeTab, setActiveTab] = useState<'content' | 'scheduling' | 'preview'>('content');
+  const [activeTab, setActiveTab] = useState<'content' | 'scheduling' | 'preview' | 'ai-generate'>('content');
   const [isRewriting, setIsRewriting] = useState(false);
   const [scheduleType, setScheduleType] = useState<'immediate' | 'delay' | 'specific'>('delay');
   const [specificDate, setSpecificDate] = useState('');
+
+  // AI Generation state
+  const [isGenerating, setIsGenerating] = useState(false);
+  const [aiAnswers, setAiAnswers] = useState<Record<string, string>>({});
+  const [aiTone, setAiTone] = useState<'friendly' | 'professional' | 'casual' | 'persuasive' | 'urgent'>('friendly');
+  const [customSubject, setCustomSubject] = useState('');
+  const [customCTA, setCustomCTA] = useState('');
+  const [showSubjectTemplates, setShowSubjectTemplates] = useState(false);
+  const [showCTATemplates, setShowCTATemplates] = useState(false);
+  const [creditsBalance, setCreditsBalance] = useState<number | null>(null);
   
   const { register, handleSubmit, reset, watch, setValue } = useForm<FormData>({
     defaultValues: {
@@ -49,7 +60,7 @@ export default function EmailBlockModal({ block, onClose, onSave }: EmailBlockMo
       const totalHours = block.send_delay_hours || 0;
       const days = Math.floor(totalHours / 24);
       const remainingHours = totalHours % 24;
-      
+
       reset({
         name: block.name,
         subject_line: block.subject_line || '',
@@ -71,6 +82,22 @@ export default function EmailBlockModal({ block, onClose, onSave }: EmailBlockMo
       }
     }
   }, [block, reset]);
+
+  // Fetch user credits
+  useEffect(() => {
+    const fetchCredits = async () => {
+      try {
+        const response = await fetch('/api/users/me/credits');
+        if (response.ok) {
+          const data = await response.json();
+          setCreditsBalance(data.credits_balance);
+        }
+      } catch (error) {
+        console.error('Failed to fetch credits:', error);
+      }
+    };
+    fetchCredits();
+  }, []);
 
   const watchedValues = watch();
   const config = block ? BLOCK_TYPE_CONFIG[block.type] : null;
@@ -107,7 +134,7 @@ export default function EmailBlockModal({ block, onClose, onSave }: EmailBlockMo
 
   const handleRewriteContent = async (tone: 'friendly' | 'professional' | 'casual' | 'persuasive' | 'urgent') => {
     setIsRewriting(true);
-    
+
     try {
       const response = await fetch('/api/ai/rewrite-content', {
         method: 'POST',
@@ -126,7 +153,7 @@ export default function EmailBlockModal({ block, onClose, onSave }: EmailBlockMo
       }
 
       const rewrittenContent = await response.json();
-      
+
       // Update form with rewritten content
       setValue('subject_line', rewrittenContent.subject_line || watchedValues.subject_line);
       setValue('preview_text', rewrittenContent.preview_text || watchedValues.preview_text);
@@ -137,6 +164,62 @@ export default function EmailBlockModal({ block, onClose, onSave }: EmailBlockMo
       alert('Failed to rewrite content. Please try again.');
     } finally {
       setIsRewriting(false);
+    }
+  };
+
+  const handleAIGenerate = async () => {
+    if (!block) return;
+
+    setIsGenerating(true);
+
+    try {
+      const response = await fetch('/api/ai/generate-content', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          type: block.type,
+          answers: aiAnswers,
+          tone: aiTone,
+          custom_subject: customSubject,
+          custom_cta: customCTA,
+        }),
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({ error: 'Unknown error' }));
+
+        if (response.status === 403 && errorData.error === 'Insufficient AI Credits') {
+          alert(`Insufficient AI Credits!\n\nYou need ${errorData.credits_needed} credits but only have ${errorData.credits_balance} credits remaining.\n\nPlease upgrade your plan or purchase more credits to continue.`);
+          return;
+        }
+
+        throw new Error(errorData.error || 'Failed to generate content');
+      }
+
+      const content = await response.json();
+
+      // Update form with AI-generated content
+      setValue('name', content.name);
+      setValue('subject_line', content.subject_line);
+      setValue('preview_text', content.preview_text);
+      setValue('body_copy', content.body_copy);
+      setValue('cta_text', content.cta_text);
+      setValue('cta_url', content.cta_url);
+
+      // Update credits balance
+      if (content.credits_used && creditsBalance !== null) {
+        setCreditsBalance(creditsBalance - content.credits_used);
+        alert(`✅ Content generated successfully!\n\n📊 Credits used: ${content.credits_used}\n📝 Words generated: ${content.word_count}\n💰 Remaining credits: ${creditsBalance - content.credits_used}`);
+      }
+
+      // Switch to content tab to show the generated content
+      setActiveTab('content');
+    } catch (error) {
+      console.error('AI generation failed:', error);
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
+      alert(`Failed to generate content: ${errorMessage}. Please try again.`);
+    } finally {
+      setIsGenerating(false);
     }
   };
 
@@ -185,6 +268,17 @@ export default function EmailBlockModal({ block, onClose, onSave }: EmailBlockMo
         <div className="border-b border-gray-200">
           <div className="flex">
             <button
+              onClick={() => setActiveTab('ai-generate')}
+              className={`px-6 py-3 font-medium border-b-2 transition-colors ${
+                activeTab === 'ai-generate'
+                  ? 'border-purple-500 text-purple-600'
+                  : 'border-transparent text-gray-500 hover:text-gray-700'
+              }`}
+            >
+              <Wand2 className="w-4 h-4 inline-block mr-2" />
+              AI Generate
+            </button>
+            <button
               onClick={() => setActiveTab('content')}
               className={`px-6 py-3 font-medium border-b-2 transition-colors ${
                 activeTab === 'content'
@@ -222,6 +316,195 @@ export default function EmailBlockModal({ block, onClose, onSave }: EmailBlockMo
 
         <form onSubmit={handleSubmit(onSubmit)}>
           <div className="h-[60vh] overflow-y-auto">
+            {activeTab === 'ai-generate' && block && (
+              <div className="p-6 space-y-6">
+                {/* Credits Display */}
+                {creditsBalance !== null && (
+                  <div className="flex items-center justify-between p-4 bg-gradient-to-r from-purple-50 to-blue-50 border border-purple-200 rounded-lg">
+                    <div className="flex items-center gap-2">
+                      <Coins className="w-5 h-5 text-purple-600" />
+                      <span className="text-sm font-medium text-gray-900">
+                        {creditsBalance.toLocaleString()} AI Credits Available
+                      </span>
+                    </div>
+                    <span className="text-xs text-gray-600">
+                      ~1,500 credits per generation
+                    </span>
+                  </div>
+                )}
+
+                {/* Questions */}
+                <div>
+                  <h3 className="text-lg font-semibold text-gray-900 mb-4">
+                    Tell us about your {BLOCK_TYPE_CONFIG[block.type].label.toLowerCase()}:
+                  </h3>
+                  <div className="space-y-4">
+                    {BLOCK_TYPE_CONFIG[block.type].questions.map((question, index) => (
+                      <div key={index}>
+                        <label className="block text-sm font-medium text-gray-700 mb-2">
+                          {question}
+                        </label>
+                        <textarea
+                          value={aiAnswers[index] || ''}
+                          onChange={(e) => setAiAnswers({ ...aiAnswers, [index]: e.target.value })}
+                          className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent resize-none"
+                          rows={2}
+                          placeholder="Type your answer here..."
+                        />
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Tone Selection */}
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-3">
+                    Choose the tone:
+                  </label>
+                  <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+                    {['friendly', 'professional', 'casual', 'persuasive', 'urgent'].map((toneOption) => (
+                      <button
+                        key={toneOption}
+                        type="button"
+                        onClick={() => setAiTone(toneOption as any)}
+                        className={`p-3 text-sm font-medium rounded-lg border-2 transition-all ${
+                          aiTone === toneOption
+                            ? 'border-purple-500 bg-purple-50 text-purple-700'
+                            : 'border-gray-200 text-gray-700 hover:border-gray-300'
+                        }`}
+                      >
+                        {toneOption.charAt(0).toUpperCase() + toneOption.slice(1)}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Custom Subject Line */}
+                <div>
+                  <div className="flex items-center justify-between mb-2">
+                    <label className="block text-sm font-medium text-gray-700">
+                      Custom Subject Line (optional)
+                    </label>
+                    {SUBJECT_LINE_TEMPLATES[block.type as keyof typeof SUBJECT_LINE_TEMPLATES]?.length > 0 && (
+                      <div className="relative">
+                        <button
+                          type="button"
+                          onClick={() => setShowSubjectTemplates(!showSubjectTemplates)}
+                          className="flex items-center gap-1 text-xs text-blue-600 hover:text-blue-800"
+                        >
+                          Use Template
+                          <ChevronDown className={`w-3 h-3 transition-transform ${showSubjectTemplates ? 'rotate-180' : ''}`} />
+                        </button>
+                        {showSubjectTemplates && (
+                          <div className="absolute top-full right-0 mt-1 bg-white border border-gray-300 rounded-lg shadow-lg z-10 min-w-[300px] max-h-48 overflow-y-auto">
+                            {SUBJECT_LINE_TEMPLATES[block.type as keyof typeof SUBJECT_LINE_TEMPLATES].map((template, index) => (
+                              <button
+                                key={index}
+                                type="button"
+                                onClick={() => {
+                                  setCustomSubject(template);
+                                  setShowSubjectTemplates(false);
+                                }}
+                                className="w-full px-3 py-2 text-left text-xs hover:bg-gray-100 border-b border-gray-100 last:border-b-0"
+                              >
+                                {template}
+                              </button>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                  <input
+                    type="text"
+                    value={customSubject}
+                    onChange={(e) => setCustomSubject(e.target.value)}
+                    className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent"
+                    placeholder="Leave empty to let AI generate"
+                  />
+                </div>
+
+                {/* Custom CTA */}
+                <div>
+                  <div className="flex items-center justify-between mb-2">
+                    <label className="block text-sm font-medium text-gray-700">
+                      Custom Call-to-Action Text (optional)
+                    </label>
+                    {CTA_TEMPLATES[block.type as keyof typeof CTA_TEMPLATES]?.length > 0 && (
+                      <div className="relative">
+                        <button
+                          type="button"
+                          onClick={() => setShowCTATemplates(!showCTATemplates)}
+                          className="flex items-center gap-1 text-xs text-blue-600 hover:text-blue-800"
+                        >
+                          Use Template
+                          <ChevronDown className={`w-3 h-3 transition-transform ${showCTATemplates ? 'rotate-180' : ''}`} />
+                        </button>
+                        {showCTATemplates && (
+                          <div className="absolute top-full right-0 mt-1 bg-white border border-gray-300 rounded-lg shadow-lg z-10 min-w-[200px] max-h-48 overflow-y-auto">
+                            {CTA_TEMPLATES[block.type as keyof typeof CTA_TEMPLATES].map((template, index) => (
+                              <button
+                                key={index}
+                                type="button"
+                                onClick={() => {
+                                  setCustomCTA(template);
+                                  setShowCTATemplates(false);
+                                }}
+                                className="w-full px-3 py-2 text-left text-xs hover:bg-gray-100 border-b border-gray-100 last:border-b-0"
+                              >
+                                {template}
+                              </button>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                  <input
+                    type="text"
+                    value={customCTA}
+                    onChange={(e) => setCustomCTA(e.target.value)}
+                    className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent"
+                    placeholder="Leave empty to let AI generate"
+                  />
+                </div>
+
+                {/* Generate Button */}
+                <div className="flex items-center justify-between p-4 bg-gray-50 rounded-lg">
+                  <div>
+                    <p className="text-sm text-gray-600">
+                      {Object.keys(aiAnswers).filter(k => aiAnswers[k]?.trim()).length > 0
+                        ? 'Ready to generate AI content'
+                        : 'Please answer at least one question above'}
+                    </p>
+                    {creditsBalance !== null && creditsBalance < 1500 && (
+                      <p className="text-xs text-red-600 mt-1">
+                        ⚠️ Insufficient credits for generation
+                      </p>
+                    )}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleAIGenerate}
+                    disabled={isGenerating || Object.keys(aiAnswers).filter(k => aiAnswers[k]?.trim()).length === 0 || (creditsBalance !== null && creditsBalance < 1500)}
+                    className="flex items-center gap-2 px-6 py-3 bg-gradient-to-r from-purple-600 to-blue-600 text-white rounded-lg hover:from-purple-700 hover:to-blue-700 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {isGenerating ? (
+                      <>
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                        Generating...
+                      </>
+                    ) : (
+                      <>
+                        <Wand2 className="w-4 h-4" />
+                        Generate Content
+                      </>
+                    )}
+                  </button>
+                </div>
+              </div>
+            )}
+
             {activeTab === 'content' && (
               <div className="p-6 space-y-6">
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
